@@ -1,0 +1,57 @@
+name: CD
+
+# main에 푸시되면 lint·빌드를 검사하고, 통과하면 Coolify 배포 웹훅을 호출한다.
+# Coolify가 main을 직접 가져와 Dockerfile로 다시 빌드·배포한다(이미지 레지스트리는 쓰지 않는다).
+# 저장소 시크릿 COOLIFY_WEBHOOK(contractcheck-fe의 Deploy Webhook URL), COOLIFY_TOKEN(Coolify API 토큰)이 필요하다.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 짧은 시간에 여러 번 머지되면 마지막 것만 배포한다
+concurrency:
+  group: cd-main
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      # Dockerfile과 같게 lock 그대로 설치하고 설치 스크립트는 실행하지 않는다
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - run: npm run build
+        env:
+          VITE_USE_MOCK: "false"
+
+  deploy:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger Coolify deploy
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$COOLIFY_WEBHOOK" ] || [ -z "$COOLIFY_TOKEN" ]; then
+            echo "::error::COOLIFY_WEBHOOK 또는 COOLIFY_TOKEN 시크릿이 없습니다. 저장소 Settings > Secrets and variables > Actions에 넣어 주세요."
+            exit 1
+          fi
+          # 웹훅은 배포를 큐에 넣고 바로 응답한다. 실제 배포 결과는 Coolify 화면에서 확인한다.
+          # deploy 엔드포인트는 POST만 받는다(GET이면 405).
+          curl -X POST --fail-with-body -sS --retry 3 --retry-delay 5 --max-time 30 \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            "$COOLIFY_WEBHOOK"
